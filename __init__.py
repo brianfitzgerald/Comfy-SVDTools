@@ -7,9 +7,14 @@ import random
 import torch
 import comfy.ldm.modules.attention
 from comfy.ldm.modules.attention import (
-    attention_basic,
     optimized_attention,
+    optimized_attention_masked,
+    default,
+    CrossAttention
 )
+import torch
+from torch import nn
+
 
 import comfy.ops
 
@@ -31,8 +36,7 @@ def get_attn_windows(
 
 
 class WindowState:
-    t_start: int
-    t_end: int
+    attention_windows: List[tuple[int, int]] = []
 
     _instance = None
 
@@ -42,16 +46,28 @@ class WindowState:
             cls._instance = cls()
         return cls._instance
 
-def attn_windowed(q, k, v, extra_options):
+
+def attn_windowed(q: T, k: T, v: T, extra_options: dict):
     state = WindowState.instance()
-    print(f"forward {state.t_start} {state.t_end} {extra_options}")
+    all_out = torch.zeros_like(q)
+    transformer_idx, block_idx, block_depth = (
+        extra_options["transformer_index"],
+        extra_options["block"],
+        extra_options["block_index"],
+    )
+    print(f"transformer {transformer_idx} block {block_idx} depth {block_depth}")
+    for t_start, t_end in state.attention_windows:
+        print(f"process attn for {t_start} {t_end}")
+        heads = extra_options["n_heads"]
+        q_t = q[t_start:t_end]
+        k_t = k[t_start:t_end]
+        v_t = v[t_start:t_end]
+        attn_out = optimized_attention(q_t, k_t, v_t, heads=heads)
+        all_out[t_start:t_end] = attn_out
+    return all_out
+
+def attn_basic(q: T, k: T, v: T, extra_options: dict):
     heads = extra_options["n_heads"]
-    cond_or_uncond = extra_options["cond_or_uncond"]
-    breakpoint()
-    q = q[state.t_start:state.t_end]
-    k = k[state.t_start:state.t_end]
-    v = v[state.t_start:state.t_end]
-    b = q.shape[0] // len(cond_or_uncond)
     return optimized_attention(q, k, v, heads=heads)
 
 def set_model_patch_replace(model, patch_kwargs, key):
@@ -59,10 +75,14 @@ def set_model_patch_replace(model, patch_kwargs, key):
     to = model.model_options["transformer_options"]
     if "patches_replace" not in to:
         to["patches_replace"] = {}
+    if "attn1" not in to["patches_replace"]:
+        to["patches_replace"]["attn1"] = {}
+    if key not in to["patches_replace"]["attn1"]:
+        to["patches_replace"]["attn1"][key] = attn_basic
     if "attn2" not in to["patches_replace"]:
         to["patches_replace"]["attn2"] = {}
     if key not in to["patches_replace"]["attn2"]:
-        to["patches_replace"]["attn2"][key] = attn_windowed
+        to["patches_replace"]["attn2"][key] = attn_basic
     else:
         print(f"already patched {key}")
 
@@ -168,36 +188,30 @@ class KSamplerExtended:
         latent_tensor = latent_image["samples"]
         video_num_frames = latent_tensor.shape[0]
 
-        attn_windows = get_attn_windows(video_num_frames, window_size, window_stride)
+        WindowState.attention_windows = get_attn_windows(
+            video_num_frames, window_size, window_stride
+        )
 
-        m = model.clone()
-        latents = latent_tensor
-        out_latents = torch.zeros_like(latents)
-        out_dict = {"samples": out_latents}
-        print(f"computing {len(attn_windows)} windows")
-        patch_model(m)
-        for i in range(len(attn_windows)):
-            t_start, t_end = attn_windows[i]
-            print(f"process window {i}/{len(attn_windows)} ({t_start}, {t_end})")
-            WindowState.instance().t_start = t_start
-            WindowState.instance().t_end = t_end
+        m: ModelPatcher = model.clone()
+        print(
+            f"computing {len(WindowState.attention_windows)} windows: {WindowState.attention_windows}"
+        )
+        # patch_model(m)
 
-            latents = common_ksampler(
-                m,
-                seed,
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                positive,
-                negative,
-                latent_image,
-                denoise=denoise,
-            )[0]
-            out_latents[t_start:t_end] = latents["samples"][t_start:t_end]
-            out_dict["samples"] = out_latents
+        latents_dict = common_ksampler(
+            m,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            latent_image,
+            denoise=denoise,
+        )[0]
 
-        return (out_dict,)
+        return (latents_dict,)
 
 
 NODE_CLASS_MAPPINGS = {
