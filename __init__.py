@@ -55,14 +55,17 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict):
         extra_options["block"],
         extra_options["block_index"],
     )
-    print(f"transformer {transformer_idx} block {block_idx} depth {block_depth}")
+    n_heads = extra_options["n_heads"]
+    temporal = extra_options.get("temporal", False)
+    print(f"attn_windows: {state.attention_windows} tf_idx: {transformer_idx} b_idx: {block_idx} b_d: {block_depth} temporal: {temporal}")
+    if not temporal:
+        return optimized_attention(q, k, v, heads=n_heads)
+
     for t_start, t_end in state.attention_windows:
-        print(f"process attn for {t_start} {t_end}")
-        heads = extra_options["n_heads"]
         q_t = q[t_start:t_end]
         k_t = k[t_start:t_end]
         v_t = v[t_start:t_end]
-        attn_out = optimized_attention(q_t, k_t, v_t, heads=heads)
+        attn_out = optimized_attention(q_t, k_t, v_t, heads=n_heads)
         all_out[t_start:t_end] = attn_out
     return all_out
 
@@ -78,52 +81,23 @@ def set_model_patch_replace(model, patch_kwargs, key):
     if "attn1" not in to["patches_replace"]:
         to["patches_replace"]["attn1"] = {}
     if key not in to["patches_replace"]["attn1"]:
-        to["patches_replace"]["attn1"][key] = attn_basic
+        to["patches_replace"]["attn1"][key] = attn_windowed
     if "attn2" not in to["patches_replace"]:
         to["patches_replace"]["attn2"] = {}
     if key not in to["patches_replace"]["attn2"]:
-        to["patches_replace"]["attn2"][key] = attn_basic
+        to["patches_replace"]["attn2"][key] = attn_windowed
     else:
         print(f"already patched {key}")
 
 
 def patch_model(model: ModelPatcher, is_sdxl: bool = False):
-    patch_kwargs = {"number": 0}
+    patch_kwargs = {}
 
-    if not is_sdxl:
-        for id in [1, 2, 4, 5, 7, 8]:  # id of input_blocks that have cross attention
-            set_model_patch_replace(model, patch_kwargs, ("input", id))
-            patch_kwargs["number"] += 1
-        for id in [
-            3,
-            4,
-            5,
-            6,
-            7,
-            8,
-            9,
-            10,
-            11,
-        ]:  # id of output_blocks that have cross attention
-            set_model_patch_replace(model, patch_kwargs, ("output", id))
-            patch_kwargs["number"] += 1
-        set_model_patch_replace(model, patch_kwargs, ("middle", 0))
-    else:
-        for id in [4, 5, 7, 8]:  # id of input_blocks that have cross attention
-            block_indices = range(2) if id in [4, 5] else range(10)  # transformer_depth
-            for index in block_indices:
-                set_model_patch_replace(model, patch_kwargs, ("input", id, index))
-                patch_kwargs["number"] += 1
-        for id in range(6):  # id of output_blocks that have cross attention
-            block_indices = (
-                range(2) if id in [3, 4, 5] else range(10)
-            )  # transformer_depth
-            for index in block_indices:
-                set_model_patch_replace(model, patch_kwargs, ("output", id, index))
-                patch_kwargs["number"] += 1
-        for index in range(10):
-            set_model_patch_replace(model, patch_kwargs, ("middle", 0, index))
-            patch_kwargs["number"] += 1
+    for id in range(11):
+        set_model_patch_replace(model, patch_kwargs, ("input", id, 1))
+    set_model_patch_replace(model, patch_kwargs, ("middle", 0, 0))
+    for id in range(12):
+        set_model_patch_replace(model, patch_kwargs, ("output", id, 1))
 
 
 class KSamplerExtended:
@@ -137,7 +111,7 @@ class KSamplerExtended:
                 "cfg": (
                     "FLOAT",
                     {
-                        "default": 8.0,
+                        "default": 2.5,
                         "min": 0.0,
                         "max": 100.0,
                         "step": 0.1,
@@ -151,11 +125,11 @@ class KSamplerExtended:
                 "latent_image": ("LATENT",),
                 "window_size": (
                     "INT",
-                    {"default": 16, "min": 0, "max": 128, "step": 1},
+                    {"default": 16, "min": 1, "max": 128, "step": 1},
                 ),
                 "window_stride": (
                     "INT",
-                    {"default": 4, "min": 0, "max": 128, "step": 1},
+                    {"default": 4, "min": 1, "max": 128, "step": 1},
                 ),
                 "denoise": (
                     "FLOAT",
@@ -196,7 +170,7 @@ class KSamplerExtended:
         print(
             f"computing {len(WindowState.attention_windows)} windows: {WindowState.attention_windows}"
         )
-        # patch_model(m)
+        patch_model(m)
 
         latents_dict = common_ksampler(
             m,
