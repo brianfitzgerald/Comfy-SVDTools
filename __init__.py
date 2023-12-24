@@ -1,3 +1,4 @@
+import time
 from typing import List
 import torch
 from comfy.model_patcher import ModelPatcher
@@ -22,6 +23,15 @@ ops = comfy.ops.disable_weight_init
 
 T = torch.Tensor
 
+def generate_weight_sequence(n):
+    if n % 2 == 0:
+        max_weight = n // 2
+        weight_sequence = list(range(1, max_weight + 1, 1)) + list(range(max_weight, 0, -1))
+    else:
+        max_weight = (n + 1) // 2
+        weight_sequence = list(range(1, max_weight, 1)) + [max_weight] + list(range(max_weight - 1, 0, -1))
+    return weight_sequence
+
 
 def get_attn_windows(
     video_length: int, window_size: int = 16, stride: int = 4
@@ -37,6 +47,7 @@ def get_attn_windows(
 
 class WindowState:
     attention_windows: List[tuple[int, int]] = []
+    num_frames: int = 0
 
     _instance = None
 
@@ -49,7 +60,7 @@ class WindowState:
 
 def attn_windowed(q: T, k: T, v: T, extra_options: dict):
     state = WindowState.instance()
-    all_out = torch.zeros_like(q)
+    value_out = torch.zeros_like(q)
     transformer_idx, block_idx, block_depth = (
         extra_options["transformer_index"],
         extra_options["block"],
@@ -57,20 +68,27 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict):
     )
     n_heads = extra_options["n_heads"]
     temporal = extra_options.get("temporal", False)
-    print(
-        f"w: {state.attention_windows} t: {temporal} q: {q.shape} k: {k.shape} v: {v.shape}"
-    )
-    if not temporal:
-        all_out = optimized_attention(q, k, v, heads=n_heads)
-        return all_out
+    time_ctx = k.shape[1] == state.num_frames
+    if not temporal or not time_ctx:
+        value_out = optimized_attention(q, k, v, heads=n_heads)
+        return value_out
 
+    count = torch.zeros_like(k)
+    print(f"t: {temporal} q: {q.shape} k: {k.shape} v: {v.shape}")
     for t_start, t_end in state.attention_windows:
         q_t = q[:, t_start:t_end]
         k_t = k[:, t_start:t_end]
         v_t = v[:, t_start:t_end]
+
+        weight_sequence = generate_weight_sequence(t_end - t_start)
+        weight_tensor = torch.ones_like(count[:, t_start:t_end])
+        weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(q.device).unsqueeze(0).unsqueeze(-1)
+
         attn_out = optimized_attention(q_t, k_t, v_t, heads=n_heads)
-        all_out[:, t_start:t_end] = attn_out
-    return all_out
+        value_out[:, t_start:t_end] += attn_out * weight_tensor
+        count[:,t_start:t_end] += weight_tensor
+    final_out = torch.where(count>0, value_out/count, value_out)
+    return final_out
 
 
 def attn_basic(q: T, k: T, v: T, extra_options: dict):
@@ -164,8 +182,9 @@ class KSamplerExtended:
     ):
         random.seed(seed)
         latent_tensor = latent_image["samples"]
-        video_num_frames = latent_tensor.shape[0]
+        video_num_frames: int = latent_tensor.shape[0]
 
+        WindowState.num_frames = video_num_frames
         WindowState.attention_windows = get_attn_windows(
             video_num_frames, window_size, window_stride
         )
