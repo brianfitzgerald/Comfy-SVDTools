@@ -10,7 +10,7 @@ from comfy.ldm.modules.attention import (
     optimized_attention,
     optimized_attention_masked,
     default,
-    CrossAttention
+    CrossAttention,
 )
 import torch
 from torch import nn
@@ -26,13 +26,13 @@ T = torch.Tensor
 def get_attn_windows(
     video_length: int, window_size: int = 16, stride: int = 4
 ) -> List[tuple[int, int]]:
-    num_blocks_time = (video_length - window_size) // stride + 1
-    views = []
-    for i in range(num_blocks_time):
-        t_start = int(i * stride)
-        t_end = t_start + window_size
-        views.append((t_start, t_end))
-    return views
+    windows = []
+    current = 0
+    while current < video_length:
+        window_end = min(current + window_size, video_length)
+        windows.append((current, window_end))
+        current += stride
+    return windows
 
 
 class WindowState:
@@ -57,21 +57,26 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict):
     )
     n_heads = extra_options["n_heads"]
     temporal = extra_options.get("temporal", False)
-    print(f"attn_windows: {state.attention_windows} tf_idx: {transformer_idx} b_idx: {block_idx} b_d: {block_depth} temporal: {temporal}")
+    print(
+        f"w: {state.attention_windows} t: {temporal} q: {q.shape} k: {k.shape} v: {v.shape}"
+    )
     if not temporal:
-        return optimized_attention(q, k, v, heads=n_heads)
+        all_out = optimized_attention(q, k, v, heads=n_heads)
+        return all_out
 
     for t_start, t_end in state.attention_windows:
-        q_t = q[t_start:t_end]
-        k_t = k[t_start:t_end]
-        v_t = v[t_start:t_end]
+        q_t = q[:, t_start:t_end]
+        k_t = k[:, t_start:t_end]
+        v_t = v[:, t_start:t_end]
         attn_out = optimized_attention(q_t, k_t, v_t, heads=n_heads)
-        all_out[t_start:t_end] = attn_out
+        all_out[:, t_start:t_end] = attn_out
     return all_out
+
 
 def attn_basic(q: T, k: T, v: T, extra_options: dict):
     heads = extra_options["n_heads"]
     return optimized_attention(q, k, v, heads=heads)
+
 
 def set_model_patch_replace(model, patch_kwargs, key):
     print(f"patching {key} with kwargs {patch_kwargs}")
@@ -90,14 +95,13 @@ def set_model_patch_replace(model, patch_kwargs, key):
         print(f"already patched {key}")
 
 
-def patch_model(model: ModelPatcher, is_sdxl: bool = False):
+def patch_model(model: ModelPatcher):
     patch_kwargs = {}
-
     for id in range(11):
-        set_model_patch_replace(model, patch_kwargs, ("input", id, 1))
+        set_model_patch_replace(model, patch_kwargs, ("input", id, 0))
     set_model_patch_replace(model, patch_kwargs, ("middle", 0, 0))
     for id in range(12):
-        set_model_patch_replace(model, patch_kwargs, ("output", id, 1))
+        set_model_patch_replace(model, patch_kwargs, ("output", id, 0))
 
 
 class KSamplerExtended:
