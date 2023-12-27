@@ -1,5 +1,5 @@
-import time
-from typing import List
+from os import times
+from typing import List, Optional
 import torch
 from comfy.model_patcher import ModelPatcher
 import comfy.samplers
@@ -8,13 +8,23 @@ import random
 import torch
 import comfy.ldm.modules.attention
 from comfy.ldm.modules.attention import (
+    SpatialVideoTransformer,
     optimized_attention,
-    optimized_attention_masked,
-    default,
-    CrossAttention,
 )
 import torch
-from torch import nn
+from inspect import isfunction
+import math
+import torch
+import torch.nn.functional as F
+from torch import nn, einsum
+from einops import rearrange, repeat
+from typing import Optional, Any
+from functools import partial
+from comfy.ldm.modules.diffusionmodules.util import checkpoint, AlphaBlender, timestep_embedding
+
+def exists(val):
+    return val is not None
+
 
 
 import comfy.ops
@@ -61,24 +71,20 @@ class WindowState:
 def attn_windowed(q: T, k: T, v: T, extra_options: dict):
     state = WindowState.instance()
     value_out = torch.zeros_like(q)
-    transformer_idx, block_idx, block_depth = (
-        extra_options["transformer_index"],
-        extra_options["block"],
-        extra_options["block_index"],
-    )
     n_heads = extra_options["n_heads"]
     temporal = extra_options.get("temporal", False)
-    time_ctx = k.shape[1] == state.num_frames
-    if not temporal or not time_ctx:
+    is_attn1 = k.shape[1] == state.num_frames
+    if not temporal or is_attn1:
         value_out = optimized_attention(q, k, v, heads=n_heads)
         return value_out
 
-    count = torch.zeros_like(k)
+    count = torch.zeros_like(q)
     print(f"t: {temporal} q: {q.shape} k: {k.shape} v: {v.shape}")
     for t_start, t_end in state.attention_windows:
         q_t = q[:, t_start:t_end]
         k_t = k[:, t_start:t_end]
         v_t = v[:, t_start:t_end]
+        print(f"t_start: {t_start} t_end: {t_end} q_t: {q_t.shape} k_t: {k_t.shape} v_t: {v_t.shape}")
 
         weight_sequence = generate_weight_sequence(t_end - t_start)
         weight_tensor = torch.ones_like(count[:, t_start:t_end])
@@ -113,13 +119,109 @@ def set_model_patch_replace(model, patch_kwargs, key):
         print(f"already patched {key}")
 
 
-def patch_model(model: ModelPatcher):
-    patch_kwargs = {}
-    for id in range(11):
-        set_model_patch_replace(model, patch_kwargs, ("input", id, 0))
-    set_model_patch_replace(model, patch_kwargs, ("middle", 0, 0))
-    for id in range(12):
-        set_model_patch_replace(model, patch_kwargs, ("output", id, 0))
+def patch_model(model: ModelPatcher, patch_attention: bool, patch_transformer: bool):
+    
+    if patch_attention:
+        # patch attention
+        patch_kwargs = {}
+        for id in range(11):
+            set_model_patch_replace(model, patch_kwargs, ("input", id, 0))
+        set_model_patch_replace(model, patch_kwargs, ("middle", 0, 0))
+        for id in range(12):
+            set_model_patch_replace(model, patch_kwargs, ("output", id, 0))
+
+    if patch_transformer:
+        # patch SpatialVideoTransformer
+        for name, module in model.model.named_modules():
+            if isinstance(module, SpatialVideoTransformer):
+                print(f"patching {name}")
+                module.forward = partial(patched_forward, module)
+            
+
+
+def patched_forward(
+    self: SpatialVideoTransformer,
+    x: torch.Tensor,
+    context: Optional[torch.Tensor] = None,
+    time_context: Optional[torch.Tensor] = None,
+    timesteps: Optional[int] = None,
+    image_only_indicator: Optional[torch.Tensor] = None,
+    transformer_options={}
+) -> torch.Tensor:
+    _, _, h, w = x.shape
+    x_in = x
+    spatial_context = None
+    if exists(context):
+        spatial_context = context
+    
+    assert spatial_context is not None
+    assert timesteps is not None
+
+    if self.use_spatial_context:
+        assert context is not None
+        assert (
+            context.ndim == 3
+        ), f"n dims of spatial context should be 3 but are {context.ndim}"
+
+        if time_context is None:
+            time_context = context
+        time_context_first_timestep = time_context[::timesteps]
+        time_context = repeat(
+            time_context_first_timestep, "b ... -> (b n) ...", n=h * w
+        )
+    elif time_context is not None and not self.use_spatial_context:
+        time_context = repeat(time_context, "b ... -> (b n) ...", n=h * w)
+        if time_context.ndim == 2:
+            time_context = rearrange(time_context, "b c -> b 1 c")
+
+    x = self.norm(x)
+    if not self.use_linear:
+        x = self.proj_in(x)
+    x = rearrange(x, "b c h w -> b (h w) c")
+    if self.use_linear:
+        x = self.proj_in(x)
+
+    initial_frames = 24
+
+    num_frames = torch.arange(initial_frames, device=x.device)
+    num_frames = num_frames.repeat_interleave(2)
+    num_frames = repeat(num_frames, "t -> b t", b=x.shape[0] // timesteps)
+    num_frames = rearrange(num_frames, "b t -> (b t)")
+    t_emb = timestep_embedding(num_frames, self.in_channels, repeat_only=False, max_period=self.max_time_embed_period).to(x.dtype)
+    emb = self.time_pos_embed(t_emb)
+    emb = emb[:, None, :]
+
+    for it_, (block, mix_block) in enumerate(
+        zip(self.transformer_blocks, self.time_stack)
+    ):
+        transformer_options["block_index"] = it_
+        x = block(
+            x,
+            context=spatial_context,
+            transformer_options=transformer_options,
+        )
+
+        x_mix = x
+        x_mix = x_mix + emb
+
+        B, S, C = x_mix.shape
+        x_mix = rearrange(x_mix, "(b t) s c -> (b s) t c", t=timesteps)
+        mix_options = transformer_options.copy()
+        mix_options["temporal"] = True
+        x_mix = mix_block(x_mix, context=time_context, transformer_options=mix_options)
+        x_mix = rearrange(
+            x_mix, "(b s) t c -> (b t) s c", s=S, b=B // timesteps, c=C, t=timesteps
+        )
+
+        x = self.time_mixer(x_spatial=x, x_temporal=x_mix, image_only_indicator=image_only_indicator)
+
+    if self.use_linear:
+        x = self.proj_out(x)
+    x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w)
+    if not self.use_linear:
+        x = self.proj_out(x)
+    out = x + x_in
+    return out
 
 
 class KSamplerExtended:
@@ -193,7 +295,7 @@ class KSamplerExtended:
         print(
             f"computing {len(WindowState.attention_windows)} windows: {WindowState.attention_windows}"
         )
-        patch_model(m)
+        patch_model(m, False, True)
 
         latents_dict = common_ksampler(
             m,
