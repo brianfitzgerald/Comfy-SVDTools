@@ -20,11 +20,15 @@ from torch import nn, einsum
 from einops import rearrange, repeat
 from typing import Optional, Any
 from functools import partial
-from comfy.ldm.modules.diffusionmodules.util import checkpoint, AlphaBlender, timestep_embedding
+from comfy.ldm.modules.diffusionmodules.util import (
+    checkpoint,
+    AlphaBlender,
+    timestep_embedding,
+)
+
 
 def exists(val):
     return val is not None
-
 
 
 import comfy.ops
@@ -33,13 +37,20 @@ ops = comfy.ops.disable_weight_init
 
 T = torch.Tensor
 
+
 def generate_weight_sequence(n):
     if n % 2 == 0:
         max_weight = n // 2
-        weight_sequence = list(range(1, max_weight + 1, 1)) + list(range(max_weight, 0, -1))
+        weight_sequence = list(range(1, max_weight + 1, 1)) + list(
+            range(max_weight, 0, -1)
+        )
     else:
         max_weight = (n + 1) // 2
-        weight_sequence = list(range(1, max_weight, 1)) + [max_weight] + list(range(max_weight - 1, 0, -1))
+        weight_sequence = (
+            list(range(1, max_weight, 1))
+            + [max_weight]
+            + list(range(max_weight - 1, 0, -1))
+        )
     return weight_sequence
 
 
@@ -57,7 +68,11 @@ def get_attn_windows(
 
 class WindowState:
     attention_windows: List[tuple[int, int]] = []
-    num_frames: int = 0
+    
+    # Total number of frames, i.e. batch size
+    video_total_frames: int = 0
+    # Size of window to apply attention to
+    window_size: int = 0
 
     _instance = None
 
@@ -73,7 +88,7 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict):
     value_out = torch.zeros_like(q)
     n_heads = extra_options["n_heads"]
     temporal = extra_options.get("temporal", False)
-    is_attn1 = k.shape[1] == state.num_frames
+    is_attn1 = k.shape[1] == state.video_total_frames
     if not temporal or is_attn1:
         value_out = optimized_attention(q, k, v, heads=n_heads)
         return value_out
@@ -84,16 +99,20 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict):
         q_t = q[:, t_start:t_end]
         k_t = k[:, t_start:t_end]
         v_t = v[:, t_start:t_end]
-        print(f"t_start: {t_start} t_end: {t_end} q_t: {q_t.shape} k_t: {k_t.shape} v_t: {v_t.shape}")
+        print(
+            f"t_start: {t_start} t_end: {t_end} q_t: {q_t.shape} k_t: {k_t.shape} v_t: {v_t.shape}"
+        )
 
         weight_sequence = generate_weight_sequence(t_end - t_start)
         weight_tensor = torch.ones_like(count[:, t_start:t_end])
-        weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(q.device).unsqueeze(0).unsqueeze(-1)
+        weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(
+            q.device
+        ).unsqueeze(0).unsqueeze(-1)
 
         attn_out = optimized_attention(q_t, k_t, v_t, heads=n_heads)
         value_out[:, t_start:t_end] += attn_out * weight_tensor
-        count[:,t_start:t_end] += weight_tensor
-    final_out = torch.where(count>0, value_out/count, value_out)
+        count[:, t_start:t_end] += weight_tensor
+    final_out = torch.where(count > 0, value_out / count, value_out)
     return final_out
 
 
@@ -120,7 +139,6 @@ def set_model_patch_replace(model, patch_kwargs, key):
 
 
 def patch_model(model: ModelPatcher, patch_attention: bool, patch_transformer: bool):
-    
     if patch_attention:
         # patch attention
         patch_kwargs = {}
@@ -136,7 +154,6 @@ def patch_model(model: ModelPatcher, patch_attention: bool, patch_transformer: b
             if isinstance(module, SpatialVideoTransformer):
                 print(f"patching {name}")
                 module.forward = partial(patched_forward, module)
-            
 
 
 def patched_forward(
@@ -146,14 +163,14 @@ def patched_forward(
     time_context: Optional[torch.Tensor] = None,
     timesteps: Optional[int] = None,
     image_only_indicator: Optional[torch.Tensor] = None,
-    transformer_options={}
+    transformer_options={},
 ) -> torch.Tensor:
     _, _, h, w = x.shape
     x_in = x
     spatial_context = None
     if exists(context):
         spatial_context = context
-    
+
     assert spatial_context is not None
     assert timesteps is not None
 
@@ -181,13 +198,18 @@ def patched_forward(
     if self.use_linear:
         x = self.proj_in(x)
 
-    initial_frames = 24
+    window_size = WindowState.window_size
 
-    num_frames = torch.arange(initial_frames, device=x.device)
-    num_frames = num_frames.repeat_interleave(2)
+    num_frames = torch.linspace(0, window_size, timesteps, device=x.device)
+    print(f"num_frames: {num_frames.shape} timesteps: {timesteps} window_size: {window_size}")
     num_frames = repeat(num_frames, "t -> b t", b=x.shape[0] // timesteps)
     num_frames = rearrange(num_frames, "b t -> (b t)")
-    t_emb = timestep_embedding(num_frames, self.in_channels, repeat_only=False, max_period=self.max_time_embed_period).to(x.dtype)
+    t_emb = timestep_embedding(
+        num_frames,
+        self.in_channels,
+        repeat_only=False,
+        max_period=self.max_time_embed_period,
+    ).to(x.dtype)
     emb = self.time_pos_embed(t_emb)
     emb = emb[:, None, :]
 
@@ -213,7 +235,9 @@ def patched_forward(
             x_mix, "(b s) t c -> (b t) s c", s=S, b=B // timesteps, c=C, t=timesteps
         )
 
-        x = self.time_mixer(x_spatial=x, x_temporal=x_mix, image_only_indicator=image_only_indicator)
+        x = self.time_mixer(
+            x_spatial=x, x_temporal=x_mix, image_only_indicator=image_only_indicator
+        )
 
     if self.use_linear:
         x = self.proj_out(x)
@@ -286,7 +310,8 @@ class KSamplerExtended:
         latent_tensor = latent_image["samples"]
         video_num_frames: int = latent_tensor.shape[0]
 
-        WindowState.num_frames = video_num_frames
+        WindowState.video_total_frames = video_num_frames
+        WindowState.window_size = window_size
         WindowState.attention_windows = get_attn_windows(
             video_num_frames, window_size, window_stride
         )
