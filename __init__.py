@@ -68,11 +68,15 @@ def get_attn_windows(
 
 class WindowState:
     attention_windows: List[tuple[int, int]] = []
-    
+
     # Total number of frames, i.e. batch size
     video_total_frames: int = 0
     # Size of window to apply attention to
     window_size: int = 0
+
+    patch_attention: bool = True
+    patch_transformer: bool = True
+    shuffle_inits: bool = True
 
     _instance = None
 
@@ -94,14 +98,10 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict):
         return value_out
 
     count = torch.zeros_like(q)
-    print(f"t: {temporal} q: {q.shape} k: {k.shape} v: {v.shape}")
     for t_start, t_end in state.attention_windows:
         q_t = q[:, t_start:t_end]
         k_t = k[:, t_start:t_end]
         v_t = v[:, t_start:t_end]
-        print(
-            f"t_start: {t_start} t_end: {t_end} q_t: {q_t.shape} k_t: {k_t.shape} v_t: {v_t.shape}"
-        )
 
         weight_sequence = generate_weight_sequence(t_end - t_start)
         weight_tensor = torch.ones_like(count[:, t_start:t_end])
@@ -155,7 +155,6 @@ def patch_model(model: ModelPatcher, patch_attention: bool, patch_transformer: b
                 print(f"patching {name}")
                 module.forward = partial(patched_forward, module)
 
-
 def patched_forward(
     self: SpatialVideoTransformer,
     x: torch.Tensor,
@@ -198,10 +197,10 @@ def patched_forward(
     if self.use_linear:
         x = self.proj_in(x)
 
-    window_size = WindowState.window_size
+    state = WindowState.instance()
 
-    num_frames = torch.linspace(0, window_size, timesteps, device=x.device)
-    print(f"num_frames: {num_frames.shape} timesteps: {timesteps} window_size: {window_size}")
+    num_frames = torch.arange(timesteps // 2, device=x.device)
+    num_frames = torch.repeat_interleave(num_frames, 2)
     num_frames = repeat(num_frames, "t -> b t", b=x.shape[0] // timesteps)
     num_frames = rearrange(num_frames, "b t -> (b t)")
     t_emb = timestep_embedding(
@@ -310,17 +309,29 @@ class KSamplerExtended:
         latent_tensor = latent_image["samples"]
         video_num_frames: int = latent_tensor.shape[0]
 
-        WindowState.video_total_frames = video_num_frames
-        WindowState.window_size = window_size
-        WindowState.attention_windows = get_attn_windows(
+        state = WindowState.instance()
+
+        state.video_total_frames = video_num_frames
+        state.window_size = window_size
+        state.attention_windows = get_attn_windows(
             video_num_frames, window_size, window_stride
         )
 
+        if state.shuffle_inits:
+            for t_start, t_end in state.attention_windows:
+                idx_list = list(range(t_start, t_end))
+                random.shuffle(idx_list)
+                print(f"shuffled {idx_list} for window {t_start} to {t_end}")
+                latent_tensor[t_start:t_end] = latent_tensor[idx_list]
+
+        latent_image["samples"] = latent_tensor
+        
         m: ModelPatcher = model.clone()
         print(
             f"computing {len(WindowState.attention_windows)} windows: {WindowState.attention_windows}"
         )
-        patch_model(m, False, True)
+        patch_model(m, state.patch_attention, state.patch_transformer)
+
 
         latents_dict = common_ksampler(
             m,
