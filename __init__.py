@@ -18,6 +18,7 @@ from functools import partial
 from comfy.ldm.modules.diffusionmodules.util import (
     timestep_embedding,
 )
+from enum import Enum
 
 
 def exists(val):
@@ -59,15 +60,26 @@ def get_attn_windows(
     return windows
 
 
+class AttentionWindowOption(Enum):
+    DISABLED = "disabled"
+    SCALE_K = "scale_k"
+    FULL_ASSIGN = "full_assign"
+
+
+attn_window_options: List[str] = [e.value for e in AttentionWindowOption]
+
+
 class WindowState:
-    attention_windows: List[tuple[int, int]] = []
+    attn_windows: List[tuple[int, int]] = []
 
     # Total number of frames, i.e. batch size
     video_total_frames: int = 0
     # Size of window to apply attention to
-    window_size: int = 0
+    attn_window_size: int = 0
 
-    patch_attention: bool = True
+    # Options
+    attn_window_option: AttentionWindowOption = AttentionWindowOption.DISABLED
+    time_embedding_frames: Optional[float] = None
     patch_transformer: bool = True
     shuffle_inits: bool = True
 
@@ -93,7 +105,7 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict):
         return value_out
 
     count = torch.zeros_like(q)
-    for t_start, t_end in state.attention_windows:
+    for t_start, t_end in state.attn_windows:
         q_t = q[:, t_start:t_end]
         k_t = k[:, t_start:t_end]
         v_t = v[:, t_start:t_end]
@@ -134,10 +146,9 @@ def set_model_patch_replace(model, patch_kwargs, key):
 
 
 def patch_model(model: ModelPatcher, unpatch: bool = False):
-    
     state = WindowState.instance()
 
-    if state.patch_attention:
+    if state.attn_window_option != AttentionWindowOption.DISABLED:
         # patch attention
         patch_kwargs = {}
         for id in range(11):
@@ -273,14 +284,16 @@ class KSamplerExtended:
                 "positive": ("CONDITIONING",),
                 "negative": ("CONDITIONING",),
                 "latent_image": ("LATENT",),
-                "window_size": (
+                "attn_window": (attn_window_options,),
+                "attn_window_size": (
                     "INT",
                     {"default": 16, "min": 1, "max": 128, "step": 1},
                 ),
-                "window_stride": (
+                "attn_window_stride": (
                     "INT",
                     {"default": 4, "min": 1, "max": 128, "step": 1},
                 ),
+                "shuffle_noise": ("BOOLEAN", {"default": False}),
                 "denoise": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
@@ -304,38 +317,40 @@ class KSamplerExtended:
         positive: dict,
         negative: dict,
         latent_image: dict,
-        window_size: int,
-        window_stride: int,
+        attn_window: str,
+        attn_window_size: int,
+        attn_window_stride: int,
+        shuffle_noise: bool,
         denoise=1.0,
     ):
         random.seed(seed)
         latent_tensor = latent_image["samples"]
         video_num_frames: int = latent_tensor.shape[0]
+        attn_window_enum = AttentionWindowOption(attn_window)
 
         state = WindowState.instance()
-
         state.video_total_frames = video_num_frames
-        state.window_size = window_size
-        state.attention_windows = get_attn_windows(
-            video_num_frames, window_size, window_stride
+        state.attn_window_size = attn_window_size
+        state.attn_windows = get_attn_windows(
+            video_num_frames, attn_window_size, attn_window_stride
         )
+        state.attn_window_option = attn_window_enum
 
-        if state.shuffle_inits:
-            for t_start, t_end in state.attention_windows:
+        if shuffle_noise:
+            for t_start, t_end in state.attn_windows:
                 idx_list = list(range(t_start, t_end))
                 random.shuffle(idx_list)
                 print(f"shuffled {idx_list} for window {t_start} to {t_end}")
                 latent_tensor[t_start:t_end] = latent_tensor[idx_list]
 
         latent_image["samples"] = latent_tensor
-        
+
         m: ModelPatcher = model.clone()
         print(
-            f"computing {len(WindowState.attention_windows)} windows: {WindowState.attention_windows}"
+            f"computing {len(WindowState.attn_windows)} windows: {WindowState.attn_windows}"
         )
 
         patch_model(m)
-
 
         latents_dict = common_ksampler(
             m,
