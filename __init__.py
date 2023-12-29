@@ -62,8 +62,8 @@ def get_attn_windows(
 
 class AttentionWindowOption(Enum):
     DISABLED = "disabled"
-    SCALE_K = "scale_k"
-    FULL_ASSIGN = "full_assign"
+    SCALE_PER_WINDOW = "scale_per_window"
+    INDEPENDENT_WINDOWS = "independent_windows"
 
 
 attn_window_options: List[str] = [e.value for e in AttentionWindowOption]
@@ -94,33 +94,47 @@ class WindowState:
         return cls._instance
 
 
-def attn_windowed(q: T, k: T, v: T, extra_options: dict):
+def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
     state = WindowState.instance()
-    value_out = torch.zeros_like(q)
+    window_option = state.attn_window_option
     n_heads = extra_options["n_heads"]
     temporal = extra_options.get("temporal", False)
+
     is_attn1 = k.shape[1] == state.video_total_frames
-    if not temporal or is_attn1:
-        value_out = optimized_attention(q, k, v, heads=n_heads)
-        return value_out
+    if not temporal or (
+        window_option == AttentionWindowOption.INDEPENDENT_WINDOWS and is_attn1
+    ):
+        out = optimized_attention(q, k, v, heads=n_heads)
+        return out
 
+    out = torch.zeros_like(q)
     count = torch.zeros_like(q)
-    for t_start, t_end in state.attn_windows:
-        q_t = q[:, t_start:t_end]
-        k_t = k[:, t_start:t_end]
-        v_t = v[:, t_start:t_end]
+    if window_option == AttentionWindowOption.INDEPENDENT_WINDOWS:
+        for t_start, t_end in state.attn_windows:
+            q_t = q[:, t_start:t_end]
+            k_t = k[:, t_start:t_end]
+            v_t = v[:, t_start:t_end]
 
-        weight_sequence = generate_weight_sequence(t_end - t_start)
-        weight_tensor = torch.ones_like(count[:, t_start:t_end])
-        weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(
-            q.device
-        ).unsqueeze(0).unsqueeze(-1)
+            weight_sequence = generate_weight_sequence(t_end - t_start)
+            weight_tensor = torch.ones_like(count[:, t_start:t_end])
+            weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(
+                q.device
+            ).unsqueeze(0).unsqueeze(-1)
 
-        attn_out = optimized_attention(q_t, k_t, v_t, heads=n_heads)
-        value_out[:, t_start:t_end] += attn_out * weight_tensor
-        count[:, t_start:t_end] += weight_tensor
-    final_out = torch.where(count > 0, value_out / count, value_out)
-    return final_out
+            attn_out = optimized_attention(q_t, k_t, v_t, heads=n_heads)
+            out[:, t_start:t_end] += attn_out * weight_tensor
+            count[:, t_start:t_end] += weight_tensor
+        final_out = torch.where(count > 0, out / count, out)
+        return final_out
+    elif window_option == AttentionWindowOption.SCALE_PER_WINDOW:
+        for t_start, t_end in state.attn_windows:
+            t_mask = torch.zeros_like(k)
+            t_mask[:, t_start:t_end] = 1.0
+            v_t = v * t_mask
+
+            attn_out = optimized_attention(q, k, v, heads=n_heads)
+            out += attn_out * t_mask
+    return out
 
 
 def attn_basic(q: T, k: T, v: T, extra_options: dict):
@@ -161,7 +175,6 @@ def patch_model(model: ModelPatcher, unpatch: bool = False):
         # patch SpatialVideoTransformer
         for layer_name, module in model.model.named_modules():
             if isinstance(module, SpatialVideoTransformer):
-                print(f"update layer={layer_name}, unpatch={unpatch}")
                 if unpatch and state.original_forwards:
                     module.forward = state.original_forwards[layer_name]
                 else:
@@ -210,8 +223,6 @@ def patched_forward(
     x = rearrange(x, "b c h w -> b (h w) c")
     if self.use_linear:
         x = self.proj_in(x)
-
-    state = WindowState.instance()
 
     num_frames = torch.arange(timesteps // 2, device=x.device)
     num_frames = torch.repeat_interleave(num_frames, 2)
