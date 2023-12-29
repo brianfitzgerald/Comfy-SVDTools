@@ -1,5 +1,4 @@
-from os import times
-from typing import List, Optional
+from typing import Dict, List, Optional
 import torch
 from comfy.model_patcher import ModelPatcher
 import comfy.samplers
@@ -12,17 +11,11 @@ from comfy.ldm.modules.attention import (
     optimized_attention,
 )
 import torch
-from inspect import isfunction
-import math
 import torch
-import torch.nn.functional as F
-from torch import nn, einsum
 from einops import rearrange, repeat
-from typing import Optional, Any
+from typing import Optional, Callable
 from functools import partial
 from comfy.ldm.modules.diffusionmodules.util import (
-    checkpoint,
-    AlphaBlender,
     timestep_embedding,
 )
 
@@ -77,6 +70,8 @@ class WindowState:
     patch_attention: bool = True
     patch_transformer: bool = True
     shuffle_inits: bool = True
+
+    original_forwards: Dict[str, Callable] = {}
 
     _instance = None
 
@@ -138,8 +133,11 @@ def set_model_patch_replace(model, patch_kwargs, key):
         print(f"already patched {key}")
 
 
-def patch_model(model: ModelPatcher, patch_attention: bool, patch_transformer: bool):
-    if patch_attention:
+def patch_model(model: ModelPatcher, unpatch: bool = False):
+    
+    state = WindowState.instance()
+
+    if state.patch_attention:
         # patch attention
         patch_kwargs = {}
         for id in range(11):
@@ -148,12 +146,17 @@ def patch_model(model: ModelPatcher, patch_attention: bool, patch_transformer: b
         for id in range(12):
             set_model_patch_replace(model, patch_kwargs, ("output", id, 0))
 
-    if patch_transformer:
+    if state.patch_transformer:
         # patch SpatialVideoTransformer
-        for name, module in model.model.named_modules():
+        for layer_name, module in model.model.named_modules():
             if isinstance(module, SpatialVideoTransformer):
-                print(f"patching {name}")
-                module.forward = partial(patched_forward, module)
+                print(f"update layer={layer_name}, unpatch={unpatch}")
+                if unpatch and state.original_forwards:
+                    module.forward = state.original_forwards[layer_name]
+                else:
+                    state.original_forwards[layer_name] = module.forward
+                    module.forward = partial(patched_forward, module)
+
 
 def patched_forward(
     self: SpatialVideoTransformer,
@@ -330,7 +333,8 @@ class KSamplerExtended:
         print(
             f"computing {len(WindowState.attention_windows)} windows: {WindowState.attention_windows}"
         )
-        patch_model(m, state.patch_attention, state.patch_transformer)
+
+        patch_model(m)
 
 
         latents_dict = common_ksampler(
@@ -345,6 +349,8 @@ class KSamplerExtended:
             latent_image,
             denoise=denoise,
         )[0]
+
+        patch_model(m, True)
 
         return (latents_dict,)
 
