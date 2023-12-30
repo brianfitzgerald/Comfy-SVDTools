@@ -1,5 +1,4 @@
 from typing import List
-from ComfyUI_stability.nodes import NODE_DISPLAY_NAME_MAPPINGS
 from comfy.model_patcher import ModelPatcher
 import random
 import torch
@@ -186,7 +185,7 @@ class SVDToolsPatcher:
 class SVDToolsPatcherExperimental:
     @classmethod
     def INPUT_TYPES(cls):
-        return BASE_INPUT_TYPES
+        return EXPERIMENTAL_INPUT_TYPES
 
     RETURN_TYPES = (
         "MODEL",
