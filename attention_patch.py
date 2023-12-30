@@ -49,7 +49,10 @@ class WindowState:
     apply_model_patches: bool = False
     shuffle_windowed_noise: bool = False
     temporal_attn_scale: float = 1.0
-    scale_k: bool = True
+
+    attn_k_scale: float = 1.0
+    attn_q_scale: float = 1.0
+    attn_v_scale: float = 1.0
 
     original_forwards: Dict[str, Callable] = {}
 
@@ -60,6 +63,7 @@ class WindowState:
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
 
 def set_model_patch_replace(model, key):
     to = model.model_options["transformer_options"]
@@ -88,16 +92,14 @@ def patch_model(model: ModelPatcher, unpatch: bool = False):
         for id in range(12):
             set_model_patch_replace(model, ("output", id, 0))
 
-    if state.apply_model_patches:
-        # patch SpatialVideoTransformer
-        for layer_name, module in model.model.named_modules():
-            if isinstance(module, SpatialVideoTransformer):
-                if unpatch and state.original_forwards:
-                    module.forward = state.original_forwards[layer_name]
-                else:
-                    state.original_forwards[layer_name] = module.forward
-                    module.forward = partial(patched_forward, module)
-
+    # patch SpatialVideoTransformer
+    for layer_name, module in model.model.named_modules():
+        if isinstance(module, SpatialVideoTransformer):
+            if unpatch and state.original_forwards:
+                module.forward = state.original_forwards[layer_name]
+            else:
+                state.original_forwards[layer_name] = module.forward
+                module.forward = partial(patched_forward, module)
 
 
 def patch_comfy_sample(orig_comfy_sample: Callable) -> Callable:
@@ -138,7 +140,7 @@ def attention_xformers_scaling(q, k, v, heads, mask=None, scale: float = 1.0):
         if b * heads > 65535:
             return attention_pytorch(q, k, v, heads, mask)
 
-    scale = math.sqrt(1 / dim_head) * scale
+    scale = math.sqrt(scale / dim_head)
 
     q, k, v = map(
         lambda t: t.unsqueeze(3)
@@ -170,19 +172,19 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
     temporal = extra_options.get("temporal", False)
 
     is_attn1 = k.shape[1] == state.video_total_frames
-    attn_scale = state.temporal_attn_scale
-    if state.scale_k:
-        attn_scale = 1
+    temporal_scale = state.temporal_attn_scale
 
     if (
         not temporal
         or window_option == AttentionWindowOption.DISABLED
         or (window_option == AttentionWindowOption.INDEPENDENT_WINDOWS and is_attn1)
     ):
-        if state.scale_k and temporal:
-            k = k * state.temporal_attn_scale
-        out = attention_xformers_scaling(q, k, v, heads=n_heads, scale=attn_scale)
+        out = attention_xformers_scaling(q, k, v, heads=n_heads, scale=temporal_scale)
         return out
+
+    q = q * state.attn_q_scale
+    v = v * state.attn_v_scale
+    k = k * state.attn_k_scale
 
     out = torch.zeros_like(q)
     count = torch.zeros_like(q)
@@ -199,7 +201,7 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
             ).unsqueeze(0).unsqueeze(-1)
 
             attn_out = attention_xformers_scaling(
-                q_t, k_t, v_t, heads=n_heads, scale=attn_scale
+                q_t, k_t, v_t, heads=n_heads, scale=temporal_scale
             )
             out[:, t_start:t_end] += attn_out * weight_tensor
             count[:, t_start:t_end] += weight_tensor
@@ -212,7 +214,9 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
             t_mask[:, t_start:t_end] = 1.0
             v_t = v * t_mask
 
-            attn_out = attention_xformers_scaling(q, k, v_t, n_heads, scale=attn_scale)
+            attn_out = attention_xformers_scaling(
+                q, k, v_t, n_heads, scale=temporal_scale
+            )
             out += attn_out * t_mask
     return out
 

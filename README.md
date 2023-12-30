@@ -2,7 +2,7 @@
 
 A collection of techniques that extend the functionality of Stable Video Diffusion in ComfyUI. Most of these were investigated for the purpose of extending context length; though they may be useful for other purposes as well.
 
-I've divided the functionality into two nodes: `SVDPatcherBasic` and `SVDPatcherExperimental`. Techniques in `SVDPatcherExperimental` are marked as 'Experimental' below and may change or be removed in the future. Techniques in `SVDPatcherBasic` tend to give good results, and probably won't change.
+I've divided the functionality into two nodes: `SVDToolsPatcher` and `SVDToolsPatcherExperimental`. Techniques in `SVDToolsPatcher` are marked as 'Experimental' below and may change or be removed in the future. Techniques in `SVDToolsPatcher` tend to give good results, and probably won't change.
 
 ## Techniques
 
@@ -45,4 +45,4 @@ Simply download or git clone this repository in `ComfyUI/custom_nodes`. An examp
 
 ## Limitations
 - `xformers` must be installed; this is temporary, until the `scale` parameter is added to the self-attention nodes in ComfyUI.
-- The `SVDPatcher` nodes override the Comfy `comfy.sample.sample` function, in order to unpatch the `forward` method of `SpatialVideoTransformer`. This may cause issues with other custom sample nodes. This is done as there's no way to patch the `forward` method of `SpatialVideoTransformer` using `ModelPatcher` - if this is added to Comfy in the future, this override will be removed.
+- The `SVDToolsPatcher` nodes override the Comfy `comfy.sample.sample` function, in order to unpatch the `forward` method of `SpatialVideoTransformer`. This may cause issues with other custom sample nodes. This is done as there's no way to patch the `forward` method of `SpatialVideoTransformer` using `ModelPatcher` - if this is added to Comfy in the future, this override will be removed.

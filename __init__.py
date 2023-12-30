@@ -1,21 +1,10 @@
-from typing import Dict, List, Optional
-import torch
+from typing import List
+from ComfyUI_stability.nodes import NODE_DISPLAY_NAME_MAPPINGS
 from comfy.model_patcher import ModelPatcher
-from nodes import common_ksampler
 import random
 import torch
-import comfy.ldm.modules.attention
-from comfy.ldm.modules.attention import (
-    SpatialVideoTransformer,
-)
 import torch
 import torch
-from einops import rearrange, repeat
-from typing import Optional, Callable
-from functools import partial
-from comfy.ldm.modules.diffusionmodules.util import (
-    timestep_embedding,
-)
 from .attention_patch import *
 
 try:
@@ -25,8 +14,6 @@ except ImportError:
     raise Exception("Install xformers to use attention windowing.")
 
 import comfy.sample as comfy_sample
-
-import comfy.ops
 
 
 attn_window_options: List[str] = [e.value for e in AttentionWindowOption]
@@ -50,6 +37,29 @@ BASE_INPUT_TYPES = {
     "required": {
         "model": ("MODEL",),
         "latent_image": ("LATENT",),
+        "scale_position_embedding": ("BOOLEAN", {"default": False}),
+        "position_embedding_frames": (
+            "INT",
+            ATTN_OPTION_ARGS,
+        ),
+        "attn_k_scale": (
+            "FLOAT",
+            {"default": 1, "min": 0, "max": 10, "step": 0.1},
+        ),
+    }
+}
+
+EXPERIMENTAL_INPUT_TYPES = {
+    "required": {
+        **BASE_INPUT_TYPES["required"],
+        "attn_q_scale": (
+            "FLOAT",
+            {"default": 1, "min": 0, "max": 10, "step": 0.1},
+        ),
+        "attn_v_scale": (
+            "FLOAT",
+            {"default": 1, "min": 0, "max": 10, "step": 0.1},
+        ),
         "attn_window": (attn_window_options,),
         "attn_window_size": (
             "INT",
@@ -59,27 +69,77 @@ BASE_INPUT_TYPES = {
             "INT",
             ATTN_OPTION_ARGS,
         ),
-        "pos_emb_scaling": ("BOOLEAN", {"default": False}),
-        "pos_emb_frames": (
-            "INT",
-            ATTN_OPTION_ARGS,
-        ),
-        "shuffle_windowed_noise": ("BOOLEAN", {"default": False}),
         "temporal_attn_scale": (
             "FLOAT",
             {"default": 1, "min": 0, "max": 10, "step": 0.1},
         ),
-    }
-}
-
-ADVANCED_INPUT_TYPES = {
-    "required": {
-        **BASE_INPUT_TYPES["required"],
+        "shuffle_windowed_noise": ("BOOLEAN", {"default": False}),
     }
 }
 
 
-class SVDPatcherBasic:
+def common(
+    model: ModelPatcher,
+    latent_image: dict,
+    scale_position_embedding: bool,
+    position_embedding_frames: int,
+    attn_k_scale: float,
+    attn_q_scale: Optional[float] = None,
+    attn_v_scale: Optional[float] = None,
+    attn_window: Optional[str] = None,
+    attn_window_size: Optional[int] = None,
+    attn_window_stride: Optional[int] = None,
+    temporal_attn_scale: Optional[float] = None,
+    shuffle_windowed_noise: Optional[bool] = None,
+):
+    latent_tensor = latent_image["samples"]
+    video_num_frames: int = latent_tensor.shape[0]
+    attn_window_enum = AttentionWindowOption(attn_window)
+
+    state = WindowState.instance()
+    state.video_total_frames = video_num_frames
+    state.attn_window_option = attn_window_enum
+    state.pos_emb_frames = (
+        position_embedding_frames if scale_position_embedding else None
+    )
+    state.attn_k_scale = attn_k_scale
+    if attn_q_scale is not None:
+        state.attn_q_scale = attn_q_scale
+    if attn_v_scale is not None:
+        state.attn_v_scale = attn_v_scale
+
+    # experimental node
+    if (
+        attn_window_size
+        and attn_window_stride
+        and temporal_attn_scale
+        and shuffle_windowed_noise
+    ):
+        state.attn_window_size = attn_window_size
+        state.attn_windows = get_attn_windows(
+            video_num_frames, attn_window_size, attn_window_stride
+        )
+        state.temporal_attn_scale = temporal_attn_scale
+        state.shuffle_windowed_noise = shuffle_windowed_noise
+
+        if shuffle_windowed_noise:
+            for t_start, t_end in state.attn_windows:
+                idx_list = list(range(t_start, t_end))
+                random.shuffle(idx_list)
+                latent_tensor[t_start:t_end] = latent_tensor[idx_list]
+
+    latent_image["samples"] = latent_tensor
+
+    m: ModelPatcher = model.clone()
+
+    patch_model(m)
+    comfy_sample.sample = patch_comfy_sample(comfy_sample.sample)
+    comfy_sample.sample_custom = patch_comfy_sample(comfy_sample.sample_custom)
+
+    return (m, latent_image)
+
+
+class SVDToolsPatcher:
     @classmethod
     def INPUT_TYPES(cls):
         return BASE_INPUT_TYPES
@@ -94,54 +154,71 @@ class SVDPatcherBasic:
 
     def patch(
         self,
-        model,
+        model: ModelPatcher,
         latent_image: dict,
+        scale_position_embedding: bool,
+        position_embedding_frames: int,
+        attn_k_scale: float,
+        attn_q_scale: float,
+        attn_v_scale: float,
         attn_window: str,
         attn_window_size: int,
         attn_window_stride: int,
-        pos_emb_scaling: bool,
-        pos_emb_frames: int,
-        shuffle_windowed_noise: bool,
         temporal_attn_scale: float,
+        shuffle_windowed_noise: bool,
     ):
-        latent_tensor = latent_image["samples"]
-        video_num_frames: int = latent_tensor.shape[0]
-        attn_window_enum = AttentionWindowOption(attn_window)
-
-        state = WindowState.instance()
-        state.video_total_frames = video_num_frames
-        state.attn_window_size = attn_window_size
-        state.attn_windows = get_attn_windows(
-            video_num_frames, attn_window_size, attn_window_stride
-        )
-        state.attn_window_option = attn_window_enum
-        state.pos_emb_frames = pos_emb_frames if pos_emb_scaling else None
-        state.temporal_attn_scale = temporal_attn_scale
-        state.shuffle_windowed_noise = shuffle_windowed_noise
-        state.apply_model_patches = (
-            state.pos_emb_frames is not None
-            or state.temporal_attn_scale != 1.0
-            or attn_window_enum != AttentionWindowOption.DISABLED
+        return common(
+            model,
+            latent_image,
+            scale_position_embedding,
+            position_embedding_frames,
+            attn_k_scale,
+            attn_q_scale,
+            attn_v_scale,
+            attn_window,
+            attn_window_size,
+            attn_window_stride,
+            temporal_attn_scale,
+            shuffle_windowed_noise,
         )
 
-        if state.shuffle_windowed_noise:
-            for t_start, t_end in state.attn_windows:
-                idx_list = list(range(t_start, t_end))
-                random.shuffle(idx_list)
-                latent_tensor[t_start:t_end] = latent_tensor[idx_list]
 
-        latent_image["samples"] = latent_tensor
+class SVDToolsPatcherExperimental:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return BASE_INPUT_TYPES
 
-        m: ModelPatcher = model.clone()
+    RETURN_TYPES = (
+        "MODEL",
+        "LATENT",
+    )
+    FUNCTION = "patch"
 
-        patch_model(m)
-        comfy_sample.sample = patch_comfy_sample(comfy_sample.sample)
-        comfy_sample.sample_custom = patch_comfy_sample(comfy_sample.sample_custom)
+    CATEGORY = "advanced"
 
-
-        return (m, latent_image)
+    def patch(
+        self,
+        model: ModelPatcher,
+        latent_image: dict,
+        scale_position_embedding: bool,
+        position_embedding_frames: int,
+        attn_k_scale: float,
+    ):
+        return common(
+            model,
+            latent_image,
+            scale_position_embedding,
+            position_embedding_frames,
+            attn_k_scale,
+        )
 
 
 NODE_CLASS_MAPPINGS = {
-    "SVDPatcherBasic": SVDPatcherBasic,
+    "SVDToolsPatcher": SVDToolsPatcher,
+    "SVDToolsPatcherExperimental": SVDToolsPatcherExperimental,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "SVDToolsPatcher": "SVD Tools Patcher",
+    "SVDToolsPatcherExperimental": "SVD Tools Patcher (Experimental)",
 }
