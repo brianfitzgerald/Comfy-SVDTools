@@ -93,11 +93,14 @@ def common(
 ):
     latent_tensor = latent_image["samples"]
     video_num_frames: int = latent_tensor.shape[0]
-    attn_window_enum = AttentionWindowOption(attn_window)
-
+    
     state = WindowState.instance()
+
+    if attn_window is not None:
+        attn_window_enum = AttentionWindowOption(attn_window)
+        state.attn_window_option = attn_window_enum
+
     state.video_total_frames = video_num_frames
-    state.attn_window_option = attn_window_enum
     state.pos_emb_frames = (
         position_embedding_frames if scale_position_embedding else None
     )
@@ -138,10 +141,10 @@ def common(
     return (m, latent_image)
 
 
-class SVDToolsPatcher:
+class SVDToolsPatcherExperimental:
     @classmethod
     def INPUT_TYPES(cls):
-        return BASE_INPUT_TYPES
+        return EXPERIMENTAL_INPUT_TYPES
 
     RETURN_TYPES = (
         "MODEL",
@@ -182,10 +185,10 @@ class SVDToolsPatcher:
         )
 
 
-class SVDToolsPatcherExperimental:
+class SVDToolsPatcher:
     @classmethod
     def INPUT_TYPES(cls):
-        return EXPERIMENTAL_INPUT_TYPES
+        return BASE_INPUT_TYPES
 
     RETURN_TYPES = (
         "MODEL",
