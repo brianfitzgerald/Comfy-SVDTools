@@ -8,7 +8,8 @@ import torch
 import comfy.ldm.modules.attention
 from comfy.ldm.modules.attention import (
     SpatialVideoTransformer,
-    optimized_attention,
+    attention_pytorch,
+    BROKEN_XFORMERS,
 )
 import torch
 import torch
@@ -19,6 +20,14 @@ from comfy.ldm.modules.diffusionmodules.util import (
     timestep_embedding,
 )
 from enum import Enum
+import comfy.model_management as model_management
+import math
+
+try:
+    import xformers  # type: ignore
+    import xformers.ops  # type: ignore
+except ImportError:
+    raise Exception("Install xformers to use attention windowing.")
 
 
 def exists(val):
@@ -30,6 +39,38 @@ import comfy.ops
 ops = comfy.ops.disable_weight_init
 
 T = torch.Tensor
+
+
+def attention_xformers_scaling(q, k, v, heads, mask=None, scale: float = 1.0):
+    b, _, dim_head = q.shape
+    dim_head //= heads
+    if BROKEN_XFORMERS:
+        if b * heads > 65535:
+            return attention_pytorch(q, k, v, heads, mask)
+
+    scale = math.sqrt(scale / dim_head)
+
+    q, k, v = map(
+        lambda t: t.unsqueeze(3)
+        .reshape(b, -1, heads, dim_head)
+        .permute(0, 2, 1, 3)
+        .reshape(b * heads, -1, dim_head)
+        .contiguous(),
+        (q, k, v),
+    )
+
+    # actually compute the attention, what we cannot get enough of
+    out = xformers.ops.memory_efficient_attention(q, k, v, attn_bias=None, scale=scale)  # type: ignore
+
+    if exists(mask):
+        raise NotImplementedError
+    out = (
+        out.unsqueeze(0)
+        .reshape(b, heads, -1, dim_head)
+        .permute(0, 2, 1, 3)
+        .reshape(b, -1, heads * dim_head)
+    )
+    return out
 
 
 def generate_weight_sequence(n):
@@ -79,9 +120,11 @@ class WindowState:
 
     # Options
     attn_window_option: AttentionWindowOption = AttentionWindowOption.DISABLED
-    time_embedding_frames: Optional[float] = None
-    patch_transformer: bool = True
-    shuffle_inits: bool = True
+    # no. of frames to use for positional embedding
+    pos_emb_frames: Optional[float] = None
+    apply_model_patches: bool = False
+    shuffle_windowed_noise: bool = False
+    temporal_attn_scale: float = 1.0
 
     original_forwards: Dict[str, Callable] = {}
 
@@ -101,10 +144,14 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
     temporal = extra_options.get("temporal", False)
 
     is_attn1 = k.shape[1] == state.video_total_frames
-    if not temporal or (
-        window_option == AttentionWindowOption.INDEPENDENT_WINDOWS and is_attn1
+    attn_scale = state.temporal_attn_scale
+
+    if (
+        not temporal
+        or window_option == AttentionWindowOption.DISABLED
+        or (window_option == AttentionWindowOption.INDEPENDENT_WINDOWS and is_attn1)
     ):
-        out = optimized_attention(q, k, v, heads=n_heads)
+        out = attention_xformers_scaling(q, k, v, heads=n_heads, scale=attn_scale)
         return out
 
     out = torch.zeros_like(q)
@@ -121,29 +168,31 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
                 q.device
             ).unsqueeze(0).unsqueeze(-1)
 
-            attn_out = optimized_attention(q_t, k_t, v_t, heads=n_heads)
+            attn_out = attention_xformers_scaling(
+                q_t, k_t, v_t, heads=n_heads, scale=attn_scale
+            )
             out[:, t_start:t_end] += attn_out * weight_tensor
             count[:, t_start:t_end] += weight_tensor
         final_out = torch.where(count > 0, out / count, out)
         return final_out
     elif window_option == AttentionWindowOption.SCALE_PER_WINDOW:
+        # TODO make this work - currently not any better than independent
         for t_start, t_end in state.attn_windows:
             t_mask = torch.zeros_like(k)
             t_mask[:, t_start:t_end] = 1.0
             v_t = v * t_mask
 
-            attn_out = optimized_attention(q, k, v, heads=n_heads)
+            attn_out = attention_xformers_scaling(q, k, v, n_heads, scale=attn_scale)
             out += attn_out * t_mask
     return out
 
 
 def attn_basic(q: T, k: T, v: T, extra_options: dict):
     heads = extra_options["n_heads"]
-    return optimized_attention(q, k, v, heads=heads)
+    return attention_xformers_scaling(q, k, v, heads=heads)
 
 
 def set_model_patch_replace(model, patch_kwargs, key):
-    print(f"patching {key} with kwargs {patch_kwargs}")
     to = model.model_options["transformer_options"]
     if "patches_replace" not in to:
         to["patches_replace"] = {}
@@ -162,7 +211,7 @@ def set_model_patch_replace(model, patch_kwargs, key):
 def patch_model(model: ModelPatcher, unpatch: bool = False):
     state = WindowState.instance()
 
-    if state.attn_window_option != AttentionWindowOption.DISABLED:
+    if not unpatch:
         # patch attention
         patch_kwargs = {}
         for id in range(11):
@@ -171,7 +220,7 @@ def patch_model(model: ModelPatcher, unpatch: bool = False):
         for id in range(12):
             set_model_patch_replace(model, patch_kwargs, ("output", id, 0))
 
-    if state.patch_transformer:
+    if state.apply_model_patches:
         # patch SpatialVideoTransformer
         for layer_name, module in model.model.named_modules():
             if isinstance(module, SpatialVideoTransformer):
@@ -224,8 +273,10 @@ def patched_forward(
     if self.use_linear:
         x = self.proj_in(x)
 
-    num_frames = torch.arange(timesteps // 2, device=x.device)
-    num_frames = torch.repeat_interleave(num_frames, 2)
+    state = WindowState.instance()
+
+    num_frames = torch.linspace(0, state.attn_window_size, timesteps, device=x.device)
+    num_frames = num_frames.round().long()
     num_frames = repeat(num_frames, "t -> b t", b=x.shape[0] // timesteps)
     num_frames = rearrange(num_frames, "b t -> (b t)")
     t_emb = timestep_embedding(
@@ -272,6 +323,9 @@ def patched_forward(
     return out
 
 
+ATTN_OPTION_ARGS = {"default": 4, "min": 1, "max": 128, "step": 1}
+
+
 class KSamplerExtended:
     @classmethod
     def INPUT_TYPES(cls):
@@ -302,12 +356,21 @@ class KSamplerExtended:
                 ),
                 "attn_window_stride": (
                     "INT",
-                    {"default": 4, "min": 1, "max": 128, "step": 1},
+                    ATTN_OPTION_ARGS,
                 ),
-                "shuffle_noise": ("BOOLEAN", {"default": False}),
+                "pos_emb_scaling": ("BOOLEAN", {"default": False}),
+                "pos_emb_frames": (
+                    "INT",
+                    ATTN_OPTION_ARGS,
+                ),
+                "shuffle_windowed_noise": ("BOOLEAN", {"default": False}),
+                "temporal_attn_scale": (
+                    "FLOAT",
+                    {"default": 1, "min": 0, "max": 10, "step": 0.1},
+                ),
                 "denoise": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                    {"default": 1, "min": 0, "max": 1, "step": 0.1},
                 ),
             }
         }
@@ -331,7 +394,10 @@ class KSamplerExtended:
         attn_window: str,
         attn_window_size: int,
         attn_window_stride: int,
-        shuffle_noise: bool,
+        pos_emb_scaling: bool,
+        pos_emb_frames: int,
+        shuffle_windowed_noise: bool,
+        temporal_attn_scale: float,
         denoise=1.0,
     ):
         random.seed(seed)
@@ -346,8 +412,16 @@ class KSamplerExtended:
             video_num_frames, attn_window_size, attn_window_stride
         )
         state.attn_window_option = attn_window_enum
+        state.pos_emb_frames = pos_emb_frames if pos_emb_scaling else None
+        state.temporal_attn_scale = temporal_attn_scale
+        state.shuffle_windowed_noise = shuffle_windowed_noise
+        state.apply_model_patches = (
+            state.pos_emb_frames is not None
+            or state.temporal_attn_scale != 1.0
+            or attn_window_enum != AttentionWindowOption.DISABLED
+        )
 
-        if shuffle_noise:
+        if state.shuffle_windowed_noise:
             for t_start, t_end in state.attn_windows:
                 idx_list = list(range(t_start, t_end))
                 random.shuffle(idx_list)
