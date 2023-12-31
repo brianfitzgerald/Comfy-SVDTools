@@ -36,8 +36,8 @@ BASE_INPUT_TYPES = {
     "required": {
         "model": ("MODEL",),
         "latent_image": ("LATENT",),
-        "scale_position_embedding": ("BOOLEAN", {"default": False}),
-        "position_embedding_frames": (
+        "scale_timestep_embedding": ("BOOLEAN", {"default": False}),
+        "timestep_embedding_frames": (
             "INT",
             ATTN_OPTION_ARGS,
         ),
@@ -203,14 +203,14 @@ class SVDToolsPatcher:
         model: ModelPatcher,
         latent_image: dict,
         scale_position_embedding: bool,
-        position_embedding_frames: int,
+        timestep_embedding_frames: int,
         attn_k_scale: float,
     ):
         return common(
             model,
             latent_image,
             scale_position_embedding,
-            position_embedding_frames,
+            timestep_embedding_frames,
             attn_k_scale,
         )
 
