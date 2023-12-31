@@ -17,7 +17,9 @@ Similar to [YaRN](https://arxiv.org/abs/2309.00071) for language models, this te
 		<th>With Key and Pos. Emb. Scaling</th>
 	</thead>
 	<tr>
-		<td><video width="100" controls src="./resources/control_00002.webm" muted="false"></video></td>
+		<td><video width="100" controls src="https://github.com/brianfitzgerald/svd_extender/raw/cleanup/resources/control.mp4" muted="false"></video></td>
+		<td><video width="100" controls src="https://github.com/brianfitzgerald/svd_extender/raw/cleanup/resources/scaled_timestep.mp4" muted="false"></video></td>
+		<td><video width="100" controls src="https://github.com/brianfitzgerald/svd_extender/raw/cleanup/resources/scaled_timestep_attn.mp4" muted="false"></video></td>
 	</tr>
 </table>
 
