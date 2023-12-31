@@ -1,23 +1,24 @@
 # Comfy-SVDTools
 
-A collection of techniques that extend the functionality of Stable Video Diffusion in ComfyUI. Most of these were investigated for the purpose of extending context length; though they may be useful for other purposes as well.
+A collection of techniques that extend the functionality of Stable Video Diffusion in ComfyUI. Most of these were investigated for the purpose of extending context length; though they may be useful for other purposes as well. In certain cases you can generate videos up to **four times** the original trained context length of the model; though this will require some experimentation.
 
 I've divided the functionality into two nodes: `SVDToolsPatcher` and `SVDToolsPatcherExperimental`. Techniques in `SVDToolsPatcher` are marked as 'Experimental' below and may change or be removed in the future. Techniques in `SVDToolsPatcher` tend to give good results, and probably won't change.
 
-<table>
-  <thead>
-		<th>Base (48 frames with SVD)</th>
-		<th>With Position Embedding Scaling</th>
-		<th>With Key and Pos. Emb. Scaling</th>
-	</thead>
-	<tr>
-		
+## Examples
 
-https://github.com/brianfitzgerald/svd_extender/assets/2797445/a0531b75-f2e4-4c10-9a42-e88e7110b598
+Baseline (48 frames, with SVD - originally trained for 12 frames):
+
+https://github.com/brianfitzgerald/svd_extender/assets/2797445/18ca3513-cf12-4598-84d3-00a3f5eda682
+
+48 frames, with timestep scaled to 12 frames:
+
+https://github.com/brianfitzgerald/svd_extender/assets/2797445/ebccc0a3-f071-40f7-9a10-62bf0118487c
+
+48 frames, with timestep scaled to 12 frames, and attn_k_scale of 0.7:
+
+https://github.com/brianfitzgerald/svd_extender/assets/2797445/284e5ef7-ea30-4e47-9094-b51082f31867
 
 
-	</tr>
-</table>
 
 ## Techniques
 
