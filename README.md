@@ -10,6 +10,17 @@ I've divided the functionality into two nodes: `SVDToolsPatcher` and `SVDToolsPa
 
 Similar to [YaRN](https://arxiv.org/abs/2309.00071) for language models, this technique scales the position embeddings in the `SpatialVideoTransformer` layers to match a set embedding length. For example, if `position_embedding_frames` is set to 12, but the batch size is 42, the model will generate video with 42 frames, but the position embeddings will be scaled to 12 frames. This allows the model to generate video with a longer context length than the position embeddings would normally allow.
 
+<table>
+  <thead>
+		<th>Base (48 frames with SVD)</th>
+		<th>With Position Embedding Scaling</th>
+		<th>With Key and Pos. Emb. Scaling</th>
+	</thead>
+	<tr>
+		<td><video width="100" controls src="./resources/control_00002.webm" muted="false"></video></td>
+	</tr>
+</table>
+
 #### Settings
 
 - `scale_timestep_embedding`: Enable / disable position embedding scaling.
