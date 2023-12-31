@@ -93,6 +93,19 @@ def common(
 ):
     latent_tensor = latent_image["samples"]
     video_num_frames: int = latent_tensor.shape[0]
+
+    print(
+        scale_position_embedding,
+        position_embedding_frames,
+        attn_k_scale,
+        attn_q_scale,
+        attn_v_scale,
+        attn_window,
+        attn_window_size,
+        attn_window_stride,
+        temporal_attn_scale,
+        shuffle_windowed_noise,
+    )
     
     state = WindowState.instance()
 
@@ -110,17 +123,18 @@ def common(
     if attn_v_scale is not None:
         state.attn_v_scale = attn_v_scale
 
+    if temporal_attn_scale is not None:
+        state.temporal_attn_scale = temporal_attn_scale
+
     if (
-        attn_window_size
-        and attn_window_stride
-        and temporal_attn_scale
-        and shuffle_windowed_noise
+        attn_window_size is not None
+        and attn_window_stride is not None
+        and shuffle_windowed_noise is not None
     ):
         state.attn_window_size = attn_window_size
         state.attn_windows = get_attn_windows(
             video_num_frames, attn_window_size, attn_window_stride
         )
-        state.temporal_attn_scale = temporal_attn_scale
         state.shuffle_windowed_noise = shuffle_windowed_noise
 
         if state.shuffle_windowed_noise:
@@ -202,14 +216,14 @@ class SVDToolsPatcher:
         self,
         model: ModelPatcher,
         latent_image: dict,
-        scale_position_embedding: bool,
+        scale_timestep_embedding: bool,
         timestep_embedding_frames: int,
         attn_k_scale: float,
     ):
         return common(
             model,
             latent_image,
-            scale_position_embedding,
+            scale_timestep_embedding,
             timestep_embedding_frames,
             attn_k_scale,
         )

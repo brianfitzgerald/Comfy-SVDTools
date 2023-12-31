@@ -137,6 +137,7 @@ def attention_xformers_scaling(q, k, v, heads, mask=None, scale: float = 1.0):
         if b * heads > 65535:
             return attention_pytorch(q, k, v, heads, mask)
 
+    print(f"xformers scale {scale}")
     scale = math.sqrt(scale / dim_head)
 
     q, k, v = map(
@@ -166,21 +167,21 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
 
     state = WindowState.instance()
     window_option = state.attn_window_option
-    temporal_scale = state.temporal_attn_scale
     n_heads = extra_options["n_heads"]
     temporal = extra_options.get("temporal", False)
     is_attn1 = k.shape[1] == state.video_total_frames
-
-    if not temporal:
-        return attention_xformers_scaling(q, k, v, heads=n_heads)
+    temporal_scale = state.temporal_attn_scale 
 
     q = q * state.attn_q_scale
     v = v * state.attn_v_scale
     k = k * state.attn_k_scale
 
-    out = torch.zeros_like(q)
-    count = torch.zeros_like(q)
+    return attention_xformers_scaling(q, k, v, heads=n_heads, scale=temporal_scale)
+
+
     if not is_attn1:
+        attn_out = torch.zeros_like(q)
+        count = torch.zeros_like(q)
         if window_option == AttentionWindowOption.INDEPENDENT_WINDOWS:
             for t_start, t_end in state.attn_windows:
                 q_t = q[:, t_start:t_end]
@@ -196,9 +197,9 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
                 attn_out = attention_xformers_scaling(
                     q_t, k_t, v_t, heads=n_heads, scale=temporal_scale
                 )
-                out[:, t_start:t_end] += attn_out * weight_tensor
+                attn_out[:, t_start:t_end] += attn_out * weight_tensor
                 count[:, t_start:t_end] += weight_tensor
-            final_out = torch.where(count > 0, out / count, out)
+            final_out = torch.where(count > 0, attn_out / count, attn_out)
             return final_out
         elif window_option == AttentionWindowOption.SCALE_PER_WINDOW:
             # TODO make this work - currently not any better than independent
@@ -210,10 +211,7 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
                 attn_out = attention_xformers_scaling(
                     q, k, v_t, n_heads, scale=temporal_scale
                 )
-                out += attn_out * t_mask
-    else:
-        return attention_xformers_scaling(q, k, v, heads=n_heads)
-    return out
+                attn_out += attn_out * t_mask
 
 
 def attn_basic(q: T, k: T, v: T, extra_options: dict):
@@ -267,7 +265,7 @@ def patched_forward(
 
     frames_end = state.timestep_embedding_frames if state.timestep_embedding_frames else timesteps
     num_frames = torch.linspace(0, frames_end, timesteps, device=x.device)
-    num_frames = num_frames.round().long()
+    num_frames = num_frames.long()
     num_frames = repeat(num_frames, "t -> b t", b=x.shape[0] // timesteps)
     num_frames = rearrange(num_frames, "b t -> (b t)")
     t_emb = timestep_embedding(
