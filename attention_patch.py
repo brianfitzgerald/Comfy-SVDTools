@@ -40,13 +40,12 @@ class WindowState:
     # Total number of frames, i.e. batch size
     video_total_frames: int = 0
     # Size of window to apply attention to
-    attn_window_size: int = 0
+    attn_window_size: Optional[int] = None
 
     # Options
     attn_window_option: AttentionWindowOption = AttentionWindowOption.DISABLED
     # no. of frames to use for positional embedding
-    pos_emb_frames: Optional[float] = None
-    apply_model_patches: bool = False
+    timestep_embedding_frames: Optional[float] = None
     shuffle_windowed_noise: bool = False
     temporal_attn_scale: float = 1.0
 
@@ -104,9 +103,7 @@ def patch_model(model: ModelPatcher, unpatch: bool = False):
 
 def patch_comfy_sample(orig_comfy_sample: Callable) -> Callable:
     def sample_svd(model: ModelPatcher, noise: T, *args, **kwargs):
-        print("Sampling..")
         out = orig_comfy_sample(model, noise, *args, **kwargs)
-        print("Unpatching..")
         patch_model(model, True)
         return out
 
@@ -177,9 +174,9 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
     if (
         not temporal
         or window_option == AttentionWindowOption.DISABLED
-        or (window_option == AttentionWindowOption.INDEPENDENT_WINDOWS and is_attn1)
+        or (window_option != AttentionWindowOption.DISABLED and is_attn1)
     ):
-        out = attention_xformers_scaling(q, k, v, heads=n_heads, scale=temporal_scale)
+        out = attention_xformers_scaling(q, k, v, heads=n_heads)
         return out
 
     q = q * state.attn_q_scale
@@ -270,7 +267,8 @@ def patched_forward(
 
     state = WindowState.instance()
 
-    num_frames = torch.linspace(0, state.attn_window_size, timesteps, device=x.device)
+    frames_end = state.timestep_embedding_frames if state.timestep_embedding_frames else timesteps
+    num_frames = torch.linspace(0, frames_end, timesteps, device=x.device)
     num_frames = num_frames.round().long()
     num_frames = repeat(num_frames, "t -> b t", b=x.shape[0] // timesteps)
     num_frames = rearrange(num_frames, "b t -> (b t)")
