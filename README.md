@@ -4,11 +4,26 @@ A collection of techniques that extend the functionality of Stable Video Diffusi
 
 I've divided the functionality into two nodes: `SVDToolsPatcher` and `SVDToolsPatcherExperimental`. Techniques in `SVDToolsPatcher` are marked as 'Experimental' below and may change or be removed in the future. Techniques in `SVDToolsPatcher` tend to give good results, and probably won't change.
 
+<table>
+  <thead>
+		<th>Base (48 frames with SVD)</th>
+		<th>With Position Embedding Scaling</th>
+		<th>With Key and Pos. Emb. Scaling</th>
+	</thead>
+	<tr>
+		<td><video width="100" controls src="https://github.com/brianfitzgerald/svd_extender/raw/cleanup/resources/control.mp4" muted="false"></video></td>
+		<td><video width="100" controls src="https://github.com/brianfitzgerald/svd_extender/raw/cleanup/resources/scaled_timestep.mp4" muted="false"></video></td>
+		<td><video width="100" controls src="https://github.com/brianfitzgerald/svd_extender/raw/cleanup/resources/scaled_timestep_attn.mp4" muted="false"></video></td>
+	</tr>
+</table>
+
 ## Techniques
 
 ### Position Embedding Scaling
 
 Similar to [YaRN](https://arxiv.org/abs/2309.00071) for language models, this technique scales the position embeddings in the `SpatialVideoTransformer` layers to match a set embedding length. For example, if `position_embedding_frames` is set to 12, but the batch size is 42, the model will generate video with 42 frames, but the position embeddings will be scaled to 12 frames. This allows the model to generate video with a longer context length than the position embeddings would normally allow.
+
+
 
 #### Settings
 
