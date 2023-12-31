@@ -110,25 +110,24 @@ def common(
     if attn_v_scale is not None:
         state.attn_v_scale = attn_v_scale
 
-    # # experimental node
-    # if (
-    #     attn_window_size
-    #     and attn_window_stride
-    #     and temporal_attn_scale
-    #     and shuffle_windowed_noise
-    # ):
-    #     state.attn_window_size = attn_window_size
-    #     state.attn_windows = get_attn_windows(
-    #         video_num_frames, attn_window_size, attn_window_stride
-    #     )
-    #     state.temporal_attn_scale = temporal_attn_scale
-    #     state.shuffle_windowed_noise = shuffle_windowed_noise
+    if (
+        attn_window_size
+        and attn_window_stride
+        and temporal_attn_scale
+        and shuffle_windowed_noise
+    ):
+        state.attn_window_size = attn_window_size
+        state.attn_windows = get_attn_windows(
+            video_num_frames, attn_window_size, attn_window_stride
+        )
+        state.temporal_attn_scale = temporal_attn_scale
+        state.shuffle_windowed_noise = shuffle_windowed_noise
 
-    #     if state.shuffle_windowed_noise:
-    #         for t_start, t_end in state.attn_windows:
-    #             idx_list = list(range(t_start, t_end))
-    #             random.shuffle(idx_list)
-    #             latent_tensor[t_start:t_end] = latent_tensor[idx_list]
+        if state.shuffle_windowed_noise:
+            for t_start, t_end in state.attn_windows:
+                idx_list = list(range(t_start, t_end))
+                random.shuffle(idx_list)
+                latent_tensor[t_start:t_end] = latent_tensor[idx_list]
 
 
     latent_image["samples"] = latent_tensor
@@ -136,8 +135,8 @@ def common(
     m: ModelPatcher = model.clone()
 
     patch_model(m)
-    # comfy_sample.sample = patch_comfy_sample(comfy_sample.sample)
-    # comfy_sample.sample_custom = patch_comfy_sample(comfy_sample.sample_custom)
+    comfy_sample.sample = patch_comfy_sample(comfy_sample.sample)
+    comfy_sample.sample_custom = patch_comfy_sample(comfy_sample.sample_custom)
 
     return (m, latent_image)
 

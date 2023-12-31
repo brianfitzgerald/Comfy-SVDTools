@@ -163,21 +163,16 @@ def attention_xformers_scaling(q, k, v, heads, mask=None, scale: float = 1.0):
 
 
 def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
+
     state = WindowState.instance()
     window_option = state.attn_window_option
+    temporal_scale = state.temporal_attn_scale
     n_heads = extra_options["n_heads"]
     temporal = extra_options.get("temporal", False)
-
     is_attn1 = k.shape[1] == state.video_total_frames
-    temporal_scale = state.temporal_attn_scale
 
-    if (
-        not temporal
-        or window_option == AttentionWindowOption.DISABLED
-        or (window_option != AttentionWindowOption.DISABLED and is_attn1)
-    ):
-        out = attention_xformers_scaling(q, k, v, heads=n_heads)
-        return out
+    if not temporal:
+        return attention_xformers_scaling(q, k, v, heads=n_heads)
 
     q = q * state.attn_q_scale
     v = v * state.attn_v_scale
@@ -185,36 +180,39 @@ def attn_windowed(q: T, k: T, v: T, extra_options: dict) -> T:
 
     out = torch.zeros_like(q)
     count = torch.zeros_like(q)
-    if window_option == AttentionWindowOption.INDEPENDENT_WINDOWS:
-        for t_start, t_end in state.attn_windows:
-            q_t = q[:, t_start:t_end]
-            k_t = k[:, t_start:t_end]
-            v_t = v[:, t_start:t_end]
+    if not is_attn1:
+        if window_option == AttentionWindowOption.INDEPENDENT_WINDOWS:
+            for t_start, t_end in state.attn_windows:
+                q_t = q[:, t_start:t_end]
+                k_t = k[:, t_start:t_end]
+                v_t = v[:, t_start:t_end]
 
-            weight_sequence = generate_weight_sequence(t_end - t_start)
-            weight_tensor = torch.ones_like(count[:, t_start:t_end])
-            weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(
-                q.device
-            ).unsqueeze(0).unsqueeze(-1)
+                weight_sequence = generate_weight_sequence(t_end - t_start)
+                weight_tensor = torch.ones_like(count[:, t_start:t_end])
+                weight_tensor = weight_tensor * torch.Tensor(weight_sequence).to(
+                    q.device
+                ).unsqueeze(0).unsqueeze(-1)
 
-            attn_out = attention_xformers_scaling(
-                q_t, k_t, v_t, heads=n_heads, scale=temporal_scale
-            )
-            out[:, t_start:t_end] += attn_out * weight_tensor
-            count[:, t_start:t_end] += weight_tensor
-        final_out = torch.where(count > 0, out / count, out)
-        return final_out
-    elif window_option == AttentionWindowOption.SCALE_PER_WINDOW:
-        # TODO make this work - currently not any better than independent
-        for t_start, t_end in state.attn_windows:
-            t_mask = torch.zeros_like(k)
-            t_mask[:, t_start:t_end] = 1.0
-            v_t = v * t_mask
+                attn_out = attention_xformers_scaling(
+                    q_t, k_t, v_t, heads=n_heads, scale=temporal_scale
+                )
+                out[:, t_start:t_end] += attn_out * weight_tensor
+                count[:, t_start:t_end] += weight_tensor
+            final_out = torch.where(count > 0, out / count, out)
+            return final_out
+        elif window_option == AttentionWindowOption.SCALE_PER_WINDOW:
+            # TODO make this work - currently not any better than independent
+            for t_start, t_end in state.attn_windows:
+                t_mask = torch.zeros_like(k)
+                t_mask[:, t_start:t_end] = 1.0
+                v_t = v * t_mask
 
-            attn_out = attention_xformers_scaling(
-                q, k, v_t, n_heads, scale=temporal_scale
-            )
-            out += attn_out * t_mask
+                attn_out = attention_xformers_scaling(
+                    q, k, v_t, n_heads, scale=temporal_scale
+                )
+                out += attn_out * t_mask
+    else:
+        return attention_xformers_scaling(q, k, v, heads=n_heads)
     return out
 
 
