@@ -137,7 +137,6 @@ def attention_xformers_scaling(q, k, v, heads, mask=None, scale: float = 1.0):
         if b * heads > 65535:
             return attention_pytorch(q, k, v, heads, mask)
 
-    print(f"xformers scale {scale}")
     scale = math.sqrt(scale / dim_head)
 
     q, k, v = map(
