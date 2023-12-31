@@ -11,9 +11,11 @@ I've divided the functionality into two nodes: `SVDToolsPatcher` and `SVDToolsPa
 		<th>With Key and Pos. Emb. Scaling</th>
 	</thead>
 	<tr>
-		<td><video width="100" controls src="https://github.com/brianfitzgerald/svd_extender/raw/cleanup/resources/control.mp4" muted="false"></video></td>
-		<td><video width="100" controls src="https://github.com/brianfitzgerald/svd_extender/raw/cleanup/resources/scaled_timestep.mp4" muted="false"></video></td>
-		<td><video width="100" controls src="https://github.com/brianfitzgerald/svd_extender/raw/cleanup/resources/scaled_timestep_attn.mp4" muted="false"></video></td>
+		
+
+https://github.com/brianfitzgerald/svd_extender/assets/2797445/a0531b75-f2e4-4c10-9a42-e88e7110b598
+
+
 	</tr>
 </table>
 
