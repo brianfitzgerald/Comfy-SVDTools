@@ -57,3 +57,12 @@ Simply download or git clone this repository in `ComfyUI/custom_nodes`. An examp
 ## Limitations
 - `xformers` must be installed; this is temporary, until the `scale` parameter is added to the self-attention nodes in ComfyUI.
 - The `SVDToolsPatcher` nodes override the Comfy `comfy.sample.sample` function, in order to unpatch the `forward` method of `SpatialVideoTransformer`. This may cause issues with other custom sample nodes. This is done as there's no way to patch the `forward` method of `SpatialVideoTransformer` using `ModelPatcher` - if this is added to Comfy in the future, this override will be removed.
+
+## Up Next
+
+Techniques I'm either currently working on implementing or plan to implement in the future:
+
+- [ ] [FreeInit](https://arxiv.org/abs/2312.07537)
+- [ ] Motion transfer, following [the FreeNoise implementation](http://haonanqiu.com/projects/FreeNoise.html)
+- [ ] Looping mode (overlap the first and last windows)
+- [ ] Text conditioning interpolation / blending
